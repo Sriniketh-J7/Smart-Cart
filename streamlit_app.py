@@ -28,6 +28,52 @@ CLUSTER_NAMES = {
     2: "Budget-Conscious Browsers",
     3: "High-Income Campaign Responders",
 }
+CLUSTER_STRATEGIES = {
+    0: {
+        "title": "Cluster 0 — Mid-Income Moderate Spenders",
+        "insight": "Large middle-income group with more children. High web visits but low conversions — browsers, not buyers.",
+        "strategy": [
+            "Run discount-led conversion campaigns targeting frequent web visitors.",
+            "Promote family product bundles (essentials, sweets, fruits).",
+            "Use retargeting ads for customers who visit without purchasing.",
+            "Avoid premium upselling — price sensitivity is high here.",
+        ],
+        "color": "#E63946",
+    },
+    1: {
+        "title": "Cluster 1 — High-Value Premium Buyers",
+        "insight": "High income, high spending across all channels. Fewer children, older age group. Active on web, store, and catalog.",
+        "strategy": [
+            "Offer premium product lines and curated catalog recommendations.",
+            "Reward loyalty with early access to new products or exclusive offers.",
+            "Use catalog marketing — this cluster responds to it.",
+            "Focus on wine and meat categories — biggest spend areas.",
+        ],
+        "color": "#457B9D",
+    },
+    2: {
+        "title": "Cluster 2 — Budget-Conscious Browsers",
+        "insight": "Lowest income and spending. Most children at home. Highest web visits but lowest purchases — price-sensitive window shoppers.",
+        "strategy": [
+            "Focus on deal alerts, flash sales, and daily discount notifications.",
+            "Promote essentials and low-ticket categories (fruits, sweets).",
+            "Use email nudges for abandoned browsing sessions.",
+            "Do not invest heavily in catalog or store promotions for this group.",
+        ],
+        "color": "#F4A261",
+    },
+    3: {
+        "title": "Cluster 3 — High-Income Campaign Responders",
+        "insight": "Similar income and spending to Cluster 1 but with a standout 30% campaign response rate. Fewest children. Highest ROI per campaign spend.",
+        "strategy": [
+            "Prioritise this cluster for all direct campaigns — highest conversion rate.",
+            "Upsell premium and gold product categories.",
+            "Build referral and loyalty programs — most likely to advocate.",
+            "Test new products or offers here first before broader rollout.",
+        ],
+        "color": "#2A9D8F",
+    },
+}
 
 sns.set_theme(style="whitegrid", font_scale=1.0)
 
@@ -50,6 +96,7 @@ with st.sidebar:
             "🎯 K Selection",
             "🗂️ Cluster Results",
             "📈 Business Insights",
+            "🔮 Predict My Segment",
         ],
     )
 
@@ -104,9 +151,22 @@ def load_and_process(file, k):
     pca = PCA(n_components=3)
     X_pca = pca.fit_transform(X_scaled)
 
+    # Agglomerative for labelling existing data
     agg = AgglomerativeClustering(n_clusters=k, linkage="ward")
     labels = agg.fit_predict(X_pca)
     df_cleaned["Cluster"] = labels
+
+    # KMeans fitted on same PCA space — used for .predict() on new inputs
+    km_pred = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km_pred.fit(X_pca)
+
+    # Map KMeans labels to Agglomerative labels by cluster centroid proximity
+    # so predictions are consistent with what's shown in the charts
+    from scipy.spatial.distance import cdist
+    agg_centroids = np.array([X_pca[labels == i].mean(axis=0) for i in range(k)])
+    km_centroids = km_pred.cluster_centers_
+    dist_matrix = cdist(km_centroids, agg_centroids)
+    km_to_agg = dist_matrix.argmin(axis=1)  # for each KMeans cluster, closest Agg cluster
 
     sil = silhouette_score(X_pca, labels)
 
@@ -116,15 +176,49 @@ def load_and_process(file, k):
     raw_with_feats = raw_with_feats.loc[df_cleaned.index]
     raw_with_feats["Cluster"] = labels
 
-    return df_cleaned, raw_with_feats, X_pca, X_scaled, pca, labels, sil
+    return df_cleaned, raw_with_feats, X_pca, X_scaled, pca, labels, sil, scaler, ohe, df_encoded.columns.tolist(), km_pred, km_to_agg
 
 
-df_cleaned, raw_feats, X_pca, X_scaled, pca, labels, sil_score = load_and_process(uploaded, n_clusters)
+df_cleaned, raw_feats, X_pca, X_scaled, pca, labels, sil_score, scaler, ohe, feature_cols, km_pred, km_to_agg = load_and_process(uploaded, n_clusters)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def fig_to_st(fig):
     st.pyplot(fig)
     plt.close(fig)
+
+
+def predict_cluster(age, income, total_spending, total_children, recency,
+                    num_deals, num_web, num_catalog, num_store, num_web_visits,
+                    complain, response, tenure_days, education, living_with):
+    """Transform user inputs through the same pipeline and return predicted cluster."""
+    # One-hot encode categorical inputs
+    cat_input = pd.DataFrame([[education, living_with]], columns=["Education", "Living_With"])
+    enc_cat = ohe.transform(cat_input)
+    enc_cat_df = pd.DataFrame(enc_cat, columns=ohe.get_feature_names_out(["Education", "Living_With"]))
+
+    num_input = pd.DataFrame([[
+        income, recency, num_deals, num_web, num_catalog, num_store,
+        num_web_visits, complain, response, age, tenure_days,
+        total_spending, total_children,
+    ]], columns=[
+        "Income", "Recency", "NumDealsPurchases", "NumWebPurchases",
+        "NumCatalogPurchases", "NumStorePurchases", "NumWebVisitsMonth",
+        "Complain", "Response", "Age", "Customer_Tenure_days",
+        "Total_spending", "Total_Children",
+    ])
+
+    full_input = pd.concat([num_input.reset_index(drop=True),
+                             enc_cat_df.reset_index(drop=True)], axis=1)
+
+    # Align columns to match training feature order
+    full_input = full_input.reindex(columns=feature_cols, fill_value=0)
+
+    X_new_scaled = scaler.transform(full_input)
+    X_new_pca = pca.transform(X_new_scaled)
+
+    km_label = km_pred.predict(X_new_pca)[0]
+    agg_label = km_to_agg[km_label]
+    return int(agg_label)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -475,7 +569,7 @@ elif section == "🗂️ Cluster Results":
         with col2:
             st.markdown("**Spending Distribution**")
             fig, ax = plt.subplots(figsize=(6, 4))
-            sns.histplot(sub["Total_spending"], kde=True, color=PALETTE[chosen], ax=ax)
+            sns.histplot(sub["Total_spending"], kde=True, color=PALETTE[chosen % len(PALETTE)], ax=ax)
             ax.set_xlabel("Total Spending")
             ax.set_title(f"Cluster {chosen} — Spending Distribution")
             fig.tight_layout()
@@ -577,3 +671,143 @@ elif section == "📈 Business Insights":
     ]
     for l in lims:
         st.markdown(f"- {l}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — Predict My Segment
+# ══════════════════════════════════════════════════════════════════════════════
+elif section == "🔮 Predict My Segment":
+    st.title("🔮 Predict Customer Segment")
+    st.markdown(
+        "Enter a customer's details below and the model will predict which segment they belong to, "
+        "along with the recommended marketing strategy for that segment."
+    )
+    st.info(
+        "**How it works:** Your inputs are passed through the same scaler and PCA used during training. "
+        "A KMeans model (fitted on the same PCA space) predicts the nearest cluster. "
+        "Labels are mapped to match the Agglomerative clusters shown in the charts."
+    )
+
+    st.markdown("---")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("Demographics")
+        age = st.slider("Age", min_value=18, max_value=85, value=40, step=1)
+        income = st.number_input("Annual Income (₹)", min_value=5000, max_value=500000,
+                                  value=50000, step=1000)
+        education = st.selectbox("Education Level",
+                                  options=["Graduate", "PostGraduate", "UnderGraduate"])
+        living_with = st.selectbox("Living With", options=["Together", "Single"])
+        total_children = st.slider("Total Children at Home", min_value=0, max_value=4, value=1)
+        tenure_days = st.slider("Days Since Enrollment", min_value=0, max_value=3000, value=1000)
+
+    with col2:
+        st.subheader("Spending")
+        total_spending = st.number_input("Total Spending (₹)", min_value=0, max_value=2600,
+                                          value=500, step=10)
+        st.caption("Rough total across wines, meat, fish, fruits, sweets, and gold.")
+        recency = st.slider("Days Since Last Purchase", min_value=0, max_value=99, value=45)
+        complain = st.selectbox("Complained in Last 2 Years", options=[0, 1],
+                                 format_func=lambda x: "No" if x == 0 else "Yes")
+        response = st.selectbox("Responded to Last Campaign", options=[0, 1],
+                                 format_func=lambda x: "No" if x == 0 else "Yes")
+
+    with col3:
+        st.subheader("Purchase Behaviour")
+        num_web = st.slider("Web Purchases (last period)", min_value=0, max_value=27, value=4)
+        num_store = st.slider("Store Purchases", min_value=0, max_value=13, value=5)
+        num_catalog = st.slider("Catalog Purchases", min_value=0, max_value=28, value=2)
+        num_deals = st.slider("Discount / Deal Purchases", min_value=0, max_value=15, value=2)
+        num_web_visits = st.slider("Web Visits per Month", min_value=0, max_value=20, value=5)
+
+    st.markdown("---")
+    predict_btn = st.button("🔍 Predict Segment", use_container_width=True, type="primary")
+
+    if predict_btn:
+        cluster_id = predict_cluster(
+            age=age, income=income, total_spending=total_spending,
+            total_children=total_children, recency=recency,
+            num_deals=num_deals, num_web=num_web, num_catalog=num_catalog,
+            num_store=num_store, num_web_visits=num_web_visits,
+            complain=complain, response=response,
+            tenure_days=tenure_days, education=education, living_with=living_with,
+        )
+
+        info = CLUSTER_STRATEGIES.get(cluster_id, {
+            "title": f"Cluster {cluster_id}",
+            "insight": "Custom cluster from adjusted k setting.",
+            "strategy": ["Apply targeted marketing based on cluster characteristics."],
+            "color": PALETTE[cluster_id % len(PALETTE)],
+        })
+
+        st.markdown("### Prediction Result")
+        st.markdown(
+            f"""
+            <div style="border-left: 6px solid {info['color']}; padding: 16px 20px;
+                        background: #f8f9fa; border-radius: 6px; margin-bottom: 20px;">
+                <h3 style="margin:0; color:{info['color']}">Cluster {cluster_id} — {CLUSTER_NAMES.get(cluster_id, 'Custom Cluster')}</h3>
+                <p style="margin-top: 10px; font-size: 1rem">{info['insight']}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("#### Recommended Marketing Strategy")
+        for point in info["strategy"]:
+            st.markdown(f"- {point}")
+
+        st.markdown("---")
+        st.markdown("#### Where This Customer Sits vs Cluster Averages")
+
+        avg = df_cleaned[df_cleaned["Cluster"] == cluster_id][
+            ["Income", "Total_spending", "Age", "Total_Children",
+             "NumWebPurchases", "NumStorePurchases", "NumWebVisitsMonth"]
+        ].mean().round(1)
+
+        user_vals = pd.Series({
+            "Income": income,
+            "Total_spending": total_spending,
+            "Age": age,
+            "Total_Children": total_children,
+            "NumWebPurchases": num_web,
+            "NumStorePurchases": num_store,
+            "NumWebVisitsMonth": num_web_visits,
+        })
+
+        compare_df = pd.DataFrame({
+            "Your Input": user_vals,
+            f"Cluster {cluster_id} Avg": avg,
+        })
+        st.dataframe(compare_df.style.background_gradient(cmap="Blues", axis=0),
+                     use_container_width=True)
+
+        # Mini bar chart comparison
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        metrics_show = ["Income", "Total_spending", "NumWebPurchases", "NumStorePurchases"]
+        labels_show = ["Income", "Spending", "Web Purchases", "Store Purchases"]
+        x = np.arange(len(metrics_show))
+        w = 0.35
+        axes[0].bar(x - w/2, [user_vals[m] for m in metrics_show], w,
+                    label="Your Input", color=info["color"], alpha=0.85)
+        axes[0].bar(x + w/2, [avg[m] for m in metrics_show], w,
+                    label=f"Cluster {cluster_id} Avg", color="#AAAAAA", alpha=0.85)
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(labels_show)
+        axes[0].set_title("Your Profile vs Cluster Average", fontweight="bold")
+        axes[0].legend()
+
+        # Cluster distribution with user marker on income vs spending
+        for i, c in enumerate(PALETTE[:n_clusters]):
+            sub = df_cleaned[df_cleaned["Cluster"] == i]
+            axes[1].scatter(sub["Total_spending"], sub["Income"],
+                            alpha=0.25, s=12, color=c, label=f"Cluster {i}")
+        axes[1].scatter(total_spending, income, color="black", s=180,
+                        zorder=5, marker="*", label="You")
+        axes[1].set_xlabel("Total Spending")
+        axes[1].set_ylabel("Income")
+        axes[1].set_title("Your Position in the Dataset", fontweight="bold")
+        axes[1].legend(fontsize=8)
+        fig.tight_layout()
+        fig_to_st(fig)
