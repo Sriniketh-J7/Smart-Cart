@@ -4,7 +4,7 @@ Unsupervised ML pipeline for customer segmentation on the SmartCart e-commerce p
 Groups 2,240 customers into behavioural clusters to enable targeted marketing and reduce churn.
 
 ---
-# Deployed Live👉: https://sj-smart-cart.streamlit.app/
+## Deployed Live👉: https://sj-smart-cart.streamlit.app/
 ---
 
 ## Tech Stack
